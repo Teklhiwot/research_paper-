@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
   TextInput,
   TouchableOpacity,
+  ActivityIndicator,
   ScrollView,
   StyleSheet,
   Alert,
@@ -12,6 +13,7 @@ import {
 import { useForm, Controller } from 'react-hook-form';
 import { Picker } from '@react-native-picker/picker';
 import uuid from 'react-native-uuid';
+import { useOfflineQueue } from '../hooks/useOfflineQueue';
 
 const SYNDROME_CODES = [
   { label: 'Select syndrome code...', value: '' },
@@ -49,25 +51,38 @@ export default function ReportScreen() {
     },
   });
 
-  const onSubmit = (data) => {
-    const payload = {
-      eventId: uuid.v4(),
-      sourceId: data.sourceId.trim(),
-      timestamp: new Date().toISOString(),
-      syndromeCode: data.syndromeCode,
-      location: data.location.trim(),
-      reporterId: data.reporterId.trim(),
-      notes: data.notes.trim(),
-    };
+  const { submitReport, isFlushing } = useOfflineQueue();
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const busy = isSubmitting || isFlushing;
 
-    // TODO: hand off payload to the offline queue / API gateway
-    console.log('Report payload:', JSON.stringify(payload, null, 2));
+  const onSubmit = async (data) => {
+    setIsSubmitting(true);
+    try {
+      const payload = {
+        eventId: uuid.v4(),
+        sourceId: data.sourceId.trim(),
+        timestamp: new Date().toISOString(),
+        syndromeCode: data.syndromeCode,
+        location: data.location.trim(),
+        reporterId: data.reporterId.trim(),
+        notes: data.notes.trim(),
+      };
 
-    Alert.alert(
-      'Report Submitted',
-      `Event ID: ${payload.eventId}\nSyndrome: ${payload.syndromeCode}\nTimestamp: ${payload.timestamp}`,
-      [{ text: 'OK', onPress: () => reset() }],
-    );
+      const status = await submitReport(payload);
+      const sent = status === 'sent';
+
+      Alert.alert(
+        sent ? 'Report Sent' : 'Report Queued',
+        sent
+          ? `Event ID: ${payload.eventId}\nSent to gateway successfully.`
+          : `Event ID: ${payload.eventId}\nSaved offline. Will be sent when connectivity is restored.`,
+        [{ text: 'OK', onPress: () => reset() }],
+      );
+    } catch (err) {
+      Alert.alert('Submission Error', err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -201,11 +216,16 @@ export default function ReportScreen() {
       </View>
 
       <TouchableOpacity
-        style={styles.submitButton}
+        style={[styles.submitButton, busy && styles.submitButtonDisabled]}
         onPress={handleSubmit(onSubmit)}
         activeOpacity={0.8}
+        disabled={busy}
       >
-        <Text style={styles.submitButtonText}>Submit Report</Text>
+        {busy ? (
+          <ActivityIndicator color="#FFFFFF" size="small" />
+        ) : (
+          <Text style={styles.submitButtonText}>Submit Report</Text>
+        )}
       </TouchableOpacity>
     </ScrollView>
   );
@@ -285,6 +305,9 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
     alignItems: 'center',
     marginTop: 28,
+  },
+  submitButtonDisabled: {
+    backgroundColor: '#93C5FD',
   },
   submitButtonText: {
     color: '#FFFFFF',
