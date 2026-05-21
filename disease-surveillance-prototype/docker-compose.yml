@@ -1,1 +1,95 @@
+services:
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  gateway:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./api-gateway:/app
+    command: >
+      sh -c "npm install express &&
+      node -e \"require('./server').listen(3000, '0.0.0.0')\""
+    ports:
+      - "3000:3000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  fog-service:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./fog-node:/app
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+      uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  storage-service:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./storage-service:/app
+    command: >
+      sh -c "npm install &&
+      node -e \"require('./src/server').listen(4000, '0.0.0.0')\""
+    ports:
+      - "4000:4000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
+  redis-data:
+  rabbitmq-data:
