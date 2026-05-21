@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "main": "index.js",
   "dependencies": {
+    "@react-native-picker/picker": "^2.11.4",
     "expo": "~56.0.3",
     "expo-status-bar": "~56.0.4",
     "react": "19.2.3",
-    "react-native": "0.85.3"
+    "react-hook-form": "^7.76.0",
+    "react-native": "0.85.3",
+    "react-native-uuid": "^2.0.4"
   },
   "scripts": {
     "start": "expo start",
