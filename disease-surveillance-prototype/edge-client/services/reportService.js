@@ -1,30 +1,32 @@
 /**
  * reportService.js
  *
- * Handles encrypt → sign → POST for a single disease-event report, and manages
- * the AsyncStorage offline queue (key: "pending_reports").
+ * Offline-resilient report submission for the disease-surveillance edge client.
  *
- * Encryption  : AES-256-GCM (@noble/ciphers) – 96-bit random IV per message.
- * Signing     : HMAC-SHA256 (@noble/hashes) over "ivHex.ciphertextHex".
- * Keys        : Read from Expo public env vars at call time so they can be
- *               rotated without a rebuild (set in .env):
- *                 EXPO_PUBLIC_GATEWAY_URL       – e.g. http://10.0.2.2:3000/report
- *                 EXPO_PUBLIC_REPORT_ENC_KEY    – 64-char hex (32 bytes)
- *                 EXPO_PUBLIC_REPORT_SIGN_KEY   – 64-char hex (32 bytes)
+ * Crypto is delegated entirely to utils/crypto.js:
+ *   • Ed25519 signing   (tweetnacl) – sign-then-encrypt
+ *   • AES-256-GCM       (@noble/ciphers) – 96-bit IV per message
+ *   • Keypair persisted to AsyncStorage (rotate via loadOrCreateKeyPair)
  *
- * Wire format sent to the gateway:
- *   POST /report  Content-Type: application/json
- *   { "iv": "<hex>", "data": "<hex ciphertext+authtag>", "sig": "<hex hmac>" }
+ * Wire format sent to the gateway (POST /report, application/json):
+ *   {
+ *     payload   : base64(iv ‖ ciphertext ‖ tag)   – encrypted report
+ *     signature : base64(Ed25519 detached sig)     – over plaintext
+ *     publicKey : base64(Ed25519 public key)
+ *     eventId   : UUID string
+ *   }
  *
- * The gateway decrypts with the same AES-256-GCM key and verifies the HMAC
- * before normalising to the canonical schema.
+ * Env vars (set in .env):
+ *   EXPO_PUBLIC_GATEWAY_URL     – e.g. http://10.0.2.2:3000/report
+ *   EXPO_PUBLIC_REPORT_ENC_KEY  – 64-char hex (32-byte AES-256 key)
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { gcm } from '@noble/ciphers/aes';
-import { randomBytes } from '@noble/ciphers/utils';
-import { hmac } from '@noble/hashes/hmac';
-import { sha256 } from '@noble/hashes/sha2';
+import {
+  loadOrCreateKeyPair,
+  buildGatewayPayload,
+  hexToBytes,
+} from '../utils/crypto';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -33,73 +35,27 @@ export const QUEUE_KEY = 'pending_reports';
 const GATEWAY_URL =
   process.env.EXPO_PUBLIC_GATEWAY_URL ?? 'http://GATEWAY_IP:3000/report';
 
-// ─── Internal crypto helpers ─────────────────────────────────────────────────
-
-/**
- * Decode a 64-character hex string into a 32-byte Uint8Array.
- * Throws clearly so misconfigurations surface at dev time.
- */
-function hexToBytes(hex, label) {
-  if (typeof hex !== 'string' || hex.length !== 64) {
-    throw new Error(
-      `${label} must be a 64-character hex string (32 bytes). ` +
-        `Got: ${hex ? `${hex.length} chars` : 'undefined'}.`,
-    );
-  }
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function toHex(bytes) {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-/**
- * Encrypt `plaintext` (Uint8Array) with AES-256-GCM.
- * Returns { ivHex, ciphertextHex } where ciphertextHex already contains the
- * 16-byte authentication tag appended by @noble/ciphers.
- */
-function encryptPayload(plaintext) {
-  const key = hexToBytes(process.env.EXPO_PUBLIC_REPORT_ENC_KEY, 'EXPO_PUBLIC_REPORT_ENC_KEY');
-  const iv = randomBytes(12); // 96-bit nonce – recommended for AES-GCM
-  const cipher = gcm(key, iv);
-  const ciphertext = cipher.encrypt(plaintext);
-  return { ivHex: toHex(iv), ciphertextHex: toHex(ciphertext) };
-}
-
-/**
- * Sign the envelope string "ivHex.ciphertextHex" with HMAC-SHA256.
- * Returns a hex-encoded signature string.
- */
-function signEnvelope(ivHex, ciphertextHex) {
-  const key = hexToBytes(process.env.EXPO_PUBLIC_REPORT_SIGN_KEY, 'EXPO_PUBLIC_REPORT_SIGN_KEY');
-  const message = new TextEncoder().encode(`${ivHex}.${ciphertextHex}`);
-  const sig = hmac(sha256, key, message);
-  return toHex(sig);
-}
-
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Encrypt, sign, and POST a single report object to the API gateway.
+ * Sign, encrypt, and POST a single report to the API gateway.
  * Throws on crypto misconfiguration, network errors, or non-2xx responses.
  *
- * @param {object} report - The canonical report payload.
+ * @param {object} report - Canonical { eventId, sourceId, timestamp, … }
  */
 export async function postReport(report) {
-  const plaintext = new TextEncoder().encode(JSON.stringify(report));
-  const { ivHex, ciphertextHex } = encryptPayload(plaintext);
-  const sig = signEnvelope(ivHex, ciphertextHex);
+  const { publicKey, secretKey } = await loadOrCreateKeyPair();
+  const symmetricKey = hexToBytes(
+    process.env.EXPO_PUBLIC_REPORT_ENC_KEY,
+    'EXPO_PUBLIC_REPORT_ENC_KEY',
+  );
+
+  const wirePayload = buildGatewayPayload(report, secretKey, publicKey, symmetricKey);
 
   const response = await fetch(GATEWAY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ iv: ivHex, data: ciphertextHex, sig }),
+    body: JSON.stringify(wirePayload),
   });
 
   if (!response.ok) {
