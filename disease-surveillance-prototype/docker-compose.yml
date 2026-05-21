@@ -1,1 +1,107 @@
+version: '3.9'
 
+services:
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  gateway:
+    image: node:20-alpine
+    container_name: gateway
+    working_dir: /app
+    command: sh -c "npm install && npm start"
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./gateway:/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  fog-service:
+    image: python:3.12-slim
+    container_name: fog-service
+    working_dir: /app
+    command: sh -c "pip install --no-cache-dir fastapi uvicorn[standard] && uvicorn main:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./fog-service:/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  storage-service:
+    image: node:20-alpine
+    container_name: storage-service
+    working_dir: /app
+    command: sh -c "npm install && npm start"
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./storage-service:/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  mongodb_data:
+  redis_data:
+  rabbitmq_data:
