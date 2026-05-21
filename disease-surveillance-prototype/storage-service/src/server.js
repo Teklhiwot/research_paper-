@@ -9,7 +9,9 @@ app.get('/health', (req, res) => {
 
 if (require.main === module) {
   const port = process.env.PORT || 4000;
-  app.listen(port, '0.0.0.0');
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Storage service listening on port ${port}`);
+  });
 }
 
 module.exports = app;
