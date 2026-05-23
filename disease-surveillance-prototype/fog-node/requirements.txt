@@ -1,2 +1,7 @@
-fastapi
-uvicorn
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+aio-pika>=9.4.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+redis>=5.0.0
+cryptography>=42.0.0
