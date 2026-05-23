@@ -158,6 +158,31 @@ reportSchema.pre('save', function preSave(next) {
   next();
 });
 
+// ─── Compound indexes ─────────────────────────────────────────────────────────
+
+// Supports time-range queries scoped to a syndrome (e.g. dashboard charts).
+reportSchema.index({ syndromeCode: 1, timestamp: -1 });
+
+// Supports time-range queries scoped to a location (e.g. geo drilldown).
+reportSchema.index({ location: 1, timestamp: -1 });
+
+// Explicit single-field index on sha256Hash for fast dedup / lookup by hash.
+// (The field-level `index: true` in the schema definition creates the same
+// index; declaring it here makes it visible alongside the compound indexes.)
+reportSchema.index({ sha256Hash: 1 });
+
+// ─── Static methods ───────────────────────────────────────────────────────────
+
+/**
+ * Find a report by its SHA-256 canonical hash.
+ *
+ * @param {string} hash - 64-character hex string
+ * @returns {Promise<import('mongoose').Document|null>}
+ */
+reportSchema.statics.findByHash = function findByHash(hash) {
+  return this.findOne({ sha256Hash: hash });
+};
+
 // ─── Model ────────────────────────────────────────────────────────────────────
 
 const Report = mongoose.model('Report', reportSchema);
