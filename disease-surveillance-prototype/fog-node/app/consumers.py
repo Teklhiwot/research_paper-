@@ -41,6 +41,7 @@ from pydantic import ValidationError
 from .aggregator import get_hourly_count, record_event
 from .anomaly import check_anomaly
 from .dedup import is_duplicate
+from .forwarder import route_event, setup_exchanges
 from .validators import SurveillanceEvent, validate_event
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,9 @@ async def _setup_topology(
 
     # 5. Bind processing queue to the source exchange.
     await processing_queue.bind(source_exchange, routing_key=_SOURCE_ROUTING_KEY)
+
+    # 6. Declare all downstream forwarding exchanges.
+    await setup_exchanges(channel)
 
     return processing_queue
 
@@ -171,9 +175,8 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         alert = await check_anomaly(
             event.syndromeCode, event.location, hourly_count, event.timestamp
         )
-        if alert:
-            # TODO: publish alert to an alerts exchange / notification service
-            logger.warning('[consumer] Anomaly detected: %s', alert)
+        # ── Step 7: Route to downstream exchange ──────────────────────────────
+        await route_event(event.model_dump(), alert)
 
         logger.info(
             '[consumer] Event %s accepted (syndrome=%s, location=%s, hourly=%d)',
