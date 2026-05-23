@@ -38,6 +38,7 @@ import aio_pika
 import aio_pika.abc
 from pydantic import ValidationError
 
+from .aggregator import record_event
 from .dedup import is_duplicate
 from .validators import SurveillanceEvent, validate_event
 
@@ -162,11 +163,13 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
             await message.ack()
             return
 
+        await record_event(event.syndromeCode, event.location, event.eventId)
+
         logger.info(
-            '[consumer] Event %s accepted (syndrome=%s, ts=%s)',
+            '[consumer] Event %s accepted (syndrome=%s, location=%s)',
             event.eventId,
             event.syndromeCode,
-            event.timestamp,
+            event.location,
         )
         await message.ack()
 
