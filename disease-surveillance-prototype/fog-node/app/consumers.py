@@ -38,6 +38,7 @@ import aio_pika
 import aio_pika.abc
 from pydantic import ValidationError
 
+from .dedup import is_duplicate
 from .validators import SurveillanceEvent, validate_event
 
 logger = logging.getLogger(__name__)
@@ -150,17 +151,23 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
             await message.nack(requeue=False)
             return
 
-        # ── Step 5: Proceed to deduplication ──────────────────────────────────
-        # Message has passed all validation.  Deduplication via Redis will be
-        # implemented here in the next iteration.
+        # ── Step 5: Deduplication ──────────────────────────────────────────────
+        if await is_duplicate(event.model_dump()):
+            # Duplicate within the 24-hour window – ack to remove from queue
+            # without routing to the DLX (not an error, just a repeat delivery).
+            logger.info(
+                '[consumer] Event %s is a duplicate – discarding',
+                event.eventId,
+            )
+            await message.ack()
+            return
+
         logger.info(
-            "[consumer] Event %s validated (syndrome=%s, ts=%s) – "
-            "proceeding to deduplication",
+            '[consumer] Event %s accepted (syndrome=%s, ts=%s)',
             event.eventId,
             event.syndromeCode,
             event.timestamp,
         )
-        # TODO: Redis deduplication
         await message.ack()
 
 
