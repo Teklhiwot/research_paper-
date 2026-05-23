@@ -38,7 +38,8 @@ import aio_pika
 import aio_pika.abc
 from pydantic import ValidationError
 
-from .aggregator import record_event
+from .aggregator import get_hourly_count, record_event
+from .anomaly import check_anomaly
 from .dedup import is_duplicate
 from .validators import SurveillanceEvent, validate_event
 
@@ -165,11 +166,21 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
 
         await record_event(event.syndromeCode, event.location, event.eventId)
 
+        # ── Step 6: Anomaly detection ──────────────────────────────────────────
+        hourly_count = await get_hourly_count(event.syndromeCode, event.location)
+        alert = await check_anomaly(
+            event.syndromeCode, event.location, hourly_count, event.timestamp
+        )
+        if alert:
+            # TODO: publish alert to an alerts exchange / notification service
+            logger.warning('[consumer] Anomaly detected: %s', alert)
+
         logger.info(
-            '[consumer] Event %s accepted (syndrome=%s, location=%s)',
+            '[consumer] Event %s accepted (syndrome=%s, location=%s, hourly=%d)',
             event.eventId,
             event.syndromeCode,
             event.location,
+            hourly_count,
         )
         await message.ack()
 
