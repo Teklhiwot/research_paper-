@@ -1,5 +1,9 @@
 version: '3.9'
 
+networks:
+  surveillance-net:
+    driver: bridge
+
 services:
   mongodb:
     image: mongo:7
@@ -9,6 +13,8 @@ services:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+    networks:
+      - surveillance-net
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -24,6 +30,8 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - surveillance-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -40,6 +48,8 @@ services:
       - "15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - surveillance-net
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -47,40 +57,63 @@ services:
       retries: 5
       start_period: 20s
 
-  gateway:
+  hardhat:
     image: node:20-alpine
-    container_name: gateway
+    container_name: hardhat
+    working_dir: /app
+    command: sh -c "npm install && npx hardhat node --hostname 0.0.0.0"
+    restart: unless-stopped
+    ports:
+      - "8545:8545"
+    volumes:
+      - ./blockchain:/app
+    env_file:
+      - ./blockchain/.env
+    networks:
+      - surveillance-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8545"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  api-gateway:
+    image: node:20-alpine
+    container_name: api-gateway
     working_dir: /app
     command: sh -c "npm install && npm start"
     restart: unless-stopped
     ports:
       - "3000:3000"
     volumes:
-      - ./gateway:/app
+      - ./api-gateway:/app
+    env_file:
+      - ./api-gateway/.env
+    networks:
+      - surveillance-net
     depends_on:
-      mongodb:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
 
-  fog-service:
+  fog-node:
     image: python:3.12-slim
-    container_name: fog-service
+    container_name: fog-node
     working_dir: /app
-    command: sh -c "pip install --no-cache-dir fastapi uvicorn[standard] && uvicorn main:app --host 0.0.0.0 --port 8000"
+    command: sh -c "pip install --no-cache-dir -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
-      - ./fog-service:/app
+      - ./fog-node:/app
+    env_file:
+      - ./fog-node/.env
+    networks:
+      - surveillance-net
     depends_on:
-      mongodb:
+      rabbitmq:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      rabbitmq:
         condition: service_healthy
 
   storage-service:
@@ -93,10 +126,12 @@ services:
       - "4000:4000"
     volumes:
       - ./storage-service:/app
+    env_file:
+      - ./storage-service/.env
+    networks:
+      - surveillance-net
     depends_on:
       mongodb:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
