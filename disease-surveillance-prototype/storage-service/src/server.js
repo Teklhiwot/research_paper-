@@ -30,12 +30,12 @@
 
 require('dotenv').config();
 
-const crypto   = require('crypto');
 const express  = require('express');
 const jwt      = require('jsonwebtoken');
 const amqplib  = require('amqplib');
 const mongoose = require('mongoose');
 
+const { logger, child } = require('./logger');
 const Report = require('../models/Report');
 const { deriveKey, decryptField } = require('./encrypt');
 
@@ -58,11 +58,11 @@ const PREFETCH_COUNT     = 10;
 // ─── Startup validation ───────────────────────────────────────────────────────
 
 if (!JWT_SECRET) {
-  console.error('[storage] FATAL: JWT_SECRET environment variable is required');
+  logger.fatal({ correlation_id: 'none' }, 'JWT_SECRET environment variable is required');
   process.exit(1);
 }
 if (!STORAGE_ENC_KEY) {
-  console.error('[storage] FATAL: STORAGE_ENC_KEY environment variable is required');
+  logger.fatal({ correlation_id: 'none' }, 'STORAGE_ENC_KEY environment variable is required');
   process.exit(1);
 }
 
@@ -108,6 +108,12 @@ function requireAuth(req, res, next) {
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
 
+// ── Correlation-ID middleware ───────────────────────────────────────────────────
+app.use((req, _res, next) => {
+  req.correlationId = req.headers['x-correlation-id'] || 'none';
+  next();
+});
+
 app.get('/health', (_req, res) => {
   res.json({ service: 'storage-service', status: 'ok' });
 });
@@ -126,11 +132,13 @@ app.get('/report/:eventId', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Invalid eventId' });
   }
 
+  const log = child(req.correlationId);
+
   let doc;
   try {
     doc = await Report.findOne({ eventId }).lean();
   } catch (err) {
-    console.error('[storage] DB error fetching %s: %s', eventId, err.message);
+    log.error({ eventId, err: err.message }, 'DB error fetching report');
     return res.status(500).json({ error: 'Database error' });
   }
 
@@ -170,11 +178,15 @@ app.get('/report/:eventId', requireAuth, async (req, res) => {
  */
 async function handleMessage(channel, msg) {
   // Step 1 – JSON decode
+  // Extract correlation_id from AMQP message properties (set by api-gateway)
+  const correlationId = msg.properties.correlationId || 'none';
+  const log = child(correlationId);
+
   let body;
   try {
     body = JSON.parse(msg.content.toString('utf8'));
   } catch (err) {
-    console.error('[storage] Cannot parse message body: %s', err.message);
+    log.error({ err: err.message }, 'Cannot parse AMQP message body');
     channel.nack(msg, false, false);   // unrecoverable – send to DLX
     return;
   }
@@ -183,7 +195,7 @@ async function handleMessage(channel, msg) {
 
   // Step 2 – coerce / validate required fields
   if (!body.eventId || !body.sourceId || !body.syndromeCode || !body.location || !body.reporterId) {
-    console.warn('[storage] Message %s missing required fields – discarding', hint);
+    log.warn({ eventId: hint }, 'Message missing required fields – discarding');
     channel.nack(msg, false, false);
     return;
   }
@@ -207,14 +219,13 @@ async function handleMessage(channel, msg) {
     const report = new Report(docFields);
     await report.save();
     channel.ack(msg);
-    console.log('[storage] Saved event %s (hash=%s…)', hint, report.sha256Hash.slice(0, 12));
+    log.info({ eventId: hint, sha256Hash: report.sha256Hash.slice(0, 12) }, 'Report saved');
   } catch (err) {
     if (err.code === 11000) {
-      // Duplicate eventId – already persisted; ack so the message is removed
-      console.warn('[storage] Duplicate eventId %s – already stored, discarding', hint);
+      log.warn({ eventId: hint }, 'Duplicate eventId – already stored, discarding');
       channel.ack(msg);
     } else {
-      console.error('[storage] Failed to save event %s: %s', hint, err.message);
+      log.error({ eventId: hint, err: err.message }, 'Failed to save report');
       channel.nack(msg, false, false);   // send to DLX for inspection
     }
   }
@@ -229,11 +240,11 @@ async function startConsumer() {
   while (true) {
     let conn;
     try {
-      console.log('[storage] Connecting to RabbitMQ …');
+      logger.info({ correlation_id: 'none' }, 'Connecting to RabbitMQ');
       conn = await amqplib.connect(RABBITMQ_URL);
 
       conn.on('error', (err) => {
-        console.error('[storage] RabbitMQ connection error: %s', err.message);
+        logger.error({ correlation_id: 'none', err: err.message }, 'RabbitMQ connection error');
       });
 
       const channel = await conn.createChannel();
@@ -244,14 +255,14 @@ async function startConsumer() {
       await channel.assertQueue(STORAGE_QUEUE, { durable: true });
       await channel.bindQueue(STORAGE_QUEUE, STORAGE_EXCHANGE, STORAGE_RKEY);
 
-      console.log('[storage] Consuming %s', STORAGE_QUEUE);
+      logger.info({ correlation_id: 'none', queue: STORAGE_QUEUE }, 'RabbitMQ consumer ready');
 
       await channel.consume(
         STORAGE_QUEUE,
         (msg) => {
           if (!msg) return;   // consumer cancelled by broker
           handleMessage(channel, msg).catch((err) => {
-            console.error('[storage] Unhandled error in handleMessage: %s', err.message);
+            logger.error({ correlation_id: msg.properties.correlationId || 'none', err: err.message }, 'Unhandled error in handleMessage');
             try { channel.nack(msg, false, false); } catch { /* channel may be closed */ }
           });
         },
@@ -260,9 +271,9 @@ async function startConsumer() {
 
       // Block until the connection drops, then fall through to reconnect
       await new Promise((resolve) => conn.on('close', resolve));
-      console.warn('[storage] RabbitMQ connection closed – reconnecting in %dms', RECONNECT_DELAY_MS);
+      logger.warn({ correlation_id: 'none', retryMs: RECONNECT_DELAY_MS }, 'RabbitMQ connection closed – reconnecting');
     } catch (err) {
-      console.error('[storage] RabbitMQ error: %s – retrying in %dms', err.message, RECONNECT_DELAY_MS);
+      logger.error({ correlation_id: 'none', err: err.message, retryMs: RECONNECT_DELAY_MS }, 'RabbitMQ error – retrying');
     } finally {
       if (conn) {
         try { await conn.close(); } catch { /* already closed */ }
@@ -278,21 +289,21 @@ async function startConsumer() {
 async function start() {
   // 1. MongoDB
   await mongoose.connect(MONGODB_URI);
-  console.log('[storage] MongoDB connected: %s', MONGODB_URI);
+  logger.info({ correlation_id: 'none', uri: MONGODB_URI }, 'MongoDB connected');
 
   // 2. RabbitMQ consumer (runs in the background; errors are logged + retried)
   startConsumer().catch((err) => {
-    console.error('[storage] Consumer exited unexpectedly: %s', err.message);
+    logger.error({ correlation_id: 'none', err: err.message }, 'Consumer exited unexpectedly');
   });
 
   // 3. HTTP server
   app.listen(PORT, () => {
-    console.log('[storage] HTTP server listening on port %d', PORT);
+    logger.info({ correlation_id: 'none', port: PORT }, 'storage-service HTTP server listening');
   });
 }
 
 start().catch((err) => {
-  console.error('[storage] Startup failed: %s', err.message);
+  logger.fatal({ correlation_id: 'none', err: err.message }, 'Startup failed');
   process.exit(1);
 });
 

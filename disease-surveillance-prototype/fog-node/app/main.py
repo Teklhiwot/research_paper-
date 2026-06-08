@@ -16,7 +16,6 @@ On shutdown the lifespan cancels the consumer task and waits for it to finish.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -24,15 +23,12 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 
 from .consumers import start_consumer
+from .logging_config import configure_logging, get_logger
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-    datefmt='%Y-%m-%dT%H:%M:%S',
-)
-logger = logging.getLogger(__name__)
+configure_logging()
+logger = get_logger(__name__)
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -74,12 +70,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             asyncio.shield(ready_event.wait()),
             timeout=CONSUMER_READY_TIMEOUT,
         )
-        logger.info("[startup] RabbitMQ consumer connected and topology declared")
+        logger.info("RabbitMQ consumer connected and topology declared",
+                    correlation_id="none")
     except asyncio.TimeoutError:
         logger.warning(
-            "[startup] RabbitMQ not reachable within %d s – "
-            "consumer will keep retrying in the background",
-            CONSUMER_READY_TIMEOUT,
+            "RabbitMQ not reachable within startup timeout – consumer will keep retrying",
+            correlation_id="none",
+            timeout_s=CONSUMER_READY_TIMEOUT,
         )
 
     yield  # ← server is running here
@@ -92,7 +89,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         except asyncio.CancelledError:
             pass
 
-    logger.info("[shutdown] Fog-node stopped cleanly")
+    logger.info("Fog-node stopped cleanly", correlation_id="none")
 
 
 # ─── Application ──────────────────────────────────────────────────────────────

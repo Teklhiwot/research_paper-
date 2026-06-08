@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Optional
 
 import aio_pika
@@ -42,9 +41,10 @@ from .aggregator import get_hourly_count, record_event
 from .anomaly import check_anomaly
 from .dedup import is_duplicate
 from .forwarder import route_event, setup_exchanges
+from .logging_config import get_logger
 from .validators import SurveillanceEvent, validate_event
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ─── Queue / exchange names (must match api-gateway constants) ────────────────
 
@@ -122,11 +122,15 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
     """
     async with message.process(ignore_processed=True):
 
-        # ── Step 1: JSON decode ───────────────────────────────────────────────
+        # Bind correlation_id from AMQP message properties for this message.
+        correlation_id: str = message.correlation_id or message.message_id or "none"
+        log = logger.bind(correlation_id=correlation_id)
+
+        # ── Step 1: JSON decode ────────────────────────────────────────────────────
         try:
             body = json.loads(message.body.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            logger.error("[consumer] Cannot decode message body: %s", exc)
+            log.error("Cannot decode message body", error=str(exc))
             await message.nack(requeue=False)
             return
 
@@ -138,10 +142,10 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         try:
             event = SurveillanceEvent.model_validate(body)
         except ValidationError as exc:
-            logger.warning(
-                "[consumer] Schema validation failed for %s: %s",
-                event_id_hint,
-                exc.errors(),
+            log.warning(
+                "Schema validation failed",
+                event_id=event_id_hint,
+                errors=exc.errors(),
             )
             await message.nack(requeue=False)
             return
@@ -149,22 +153,17 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         # ── Step 3: Business rule validation ──────────────────────────────────
         valid, errors = validate_event(event)
         if not valid:
-            logger.warning(
-                "[consumer] Business rule violation for %s: %s",
-                event.eventId,
-                errors,
+            log.warning(
+                "Business rule violation",
+                event_id=event.eventId,
+                errors=errors,
             )
             await message.nack(requeue=False)
             return
 
         # ── Step 5: Deduplication ──────────────────────────────────────────────
         if await is_duplicate(event.model_dump()):
-            # Duplicate within the 24-hour window – ack to remove from queue
-            # without routing to the DLX (not an error, just a repeat delivery).
-            logger.info(
-                '[consumer] Event %s is a duplicate – discarding',
-                event.eventId,
-            )
+            log.info("Duplicate event – discarding", event_id=event.eventId)
             await message.ack()
             return
 
@@ -178,12 +177,12 @@ async def _handle_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         # ── Step 7: Route to downstream exchange ──────────────────────────────
         await route_event(event.model_dump(), alert)
 
-        logger.info(
-            '[consumer] Event %s accepted (syndrome=%s, location=%s, hourly=%d)',
-            event.eventId,
-            event.syndromeCode,
-            event.location,
-            hourly_count,
+        log.info(
+            "Event accepted",
+            event_id=event.eventId,
+            syndrome_code=event.syndromeCode,
+            location=event.location,
+            hourly_count=hourly_count,
         )
         await message.ack()
 
@@ -211,7 +210,7 @@ async def start_consumer(
     """
     while True:
         try:
-            logger.info("[consumer] Connecting to RabbitMQ …")
+            logger.info("Connecting to RabbitMQ", correlation_id="none")
             connection = await aio_pika.connect_robust(rabbitmq_url)
 
             async with connection:
@@ -224,9 +223,10 @@ async def start_consumer(
                     ready.set()
 
                 logger.info(
-                    "[consumer] Ready – consuming from '%s' (prefetch=%d)",
-                    _PROCESSING_QUEUE,
-                    _PREFETCH_COUNT,
+                    "Consumer ready",
+                    correlation_id="none",
+                    queue=_PROCESSING_QUEUE,
+                    prefetch=_PREFETCH_COUNT,
                 )
 
                 async with processing_queue.iterator() as queue_iter:
@@ -234,12 +234,15 @@ async def start_consumer(
                         await _handle_message(message)
 
         except asyncio.CancelledError:
-            logger.info("[consumer] Shutdown signal received – stopping")
+            logger.info("Shutdown signal received – stopping", correlation_id="none")
             raise
 
         except Exception as exc:
             logger.error(
-                "[consumer] Unexpected error: %s – retrying in 5 s", exc, exc_info=True
+                "Unexpected consumer error – retrying in 5 s",
+                correlation_id="none",
+                error=str(exc),
+                exc_info=True,
             )
             await asyncio.sleep(5)
 

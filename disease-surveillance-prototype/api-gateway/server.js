@@ -2,10 +2,13 @@
 
 require('dotenv').config();
 
-const express = require('express');
 const crypto  = require('crypto');   // built-in – AES-256-GCM decryption
 const nacl    = require('tweetnacl'); // Ed25519 signature verification
 const amqp    = require('amqplib');
+const express = require('express');
+
+const { logger, child } = require('./src/logger');
+const { authenticate, requireRole } = require('./src/authMiddleware');
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -33,22 +36,22 @@ async function connectRabbitMQ() {
 
     // Reconnect automatically on connection-level errors or graceful closes
     conn.on('error', (err) => {
-      console.error('[RabbitMQ] Connection error:', err.message);
+      logger.error({ correlation_id: 'none', err: err.message }, 'RabbitMQ connection error');
       mqChannel = null;
       setTimeout(connectRabbitMQ, 5000);
     });
     conn.on('close', () => {
-      console.warn('[RabbitMQ] Connection closed – reconnecting in 5 s');
+      logger.warn({ correlation_id: 'none' }, 'RabbitMQ connection closed – reconnecting in 5 s');
       mqChannel = null;
       setTimeout(connectRabbitMQ, 5000);
     });
 
     mqChannel    = ch;
     mqConnecting = false;
-    console.log('[RabbitMQ] Connected. Exchange ready:', EXCHANGE);
+    logger.info({ correlation_id: 'none', exchange: EXCHANGE }, 'RabbitMQ connected');
   } catch (err) {
     mqConnecting = false;
-    console.error('[RabbitMQ] Failed to connect:', err.message, '– retrying in 5 s');
+    logger.error({ correlation_id: 'none', err: err.message }, 'RabbitMQ failed to connect – retrying in 5 s');
     setTimeout(connectRabbitMQ, 5000);
   }
 }
@@ -165,6 +168,14 @@ const app = express();
 // Constrain body size to prevent oversized payloads (DoS mitigation)
 app.use(express.json({ limit: '64kb' }));
 
+// ── Correlation-ID middleware ─────────────────────────────────────────────────
+// Reads X-Correlation-Id from incoming requests (or generates a fallback UUID)
+// and attaches it to req.correlationId for downstream handlers.
+app.use((req, _res, next) => {
+  req.correlationId = req.headers['x-correlation-id'] || crypto.randomUUID();
+  next();
+});
+
 // ── GET / – health check ─────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
   res.json({
@@ -192,7 +203,7 @@ app.get('/', (_req, res) => {
  *   401 { error }                    – signature verification failed
  *   503 { error }                    – message queue temporarily unavailable
  */
-app.post('/report', async (req, res, next) => {
+app.post('/report', authenticate, requireRole('REPORTER'), async (req, res, next) => {
   try {
     const { payload, signature, publicKey, eventId } = req.body ?? {};
 
@@ -203,13 +214,15 @@ app.post('/report', async (req, res, next) => {
       });
     }
 
+    const log = child(req.correlationId);
+
     // ── 2. Parse AES key from env ────────────────────────────────────────────
     let aesKey;
     try {
       aesKey = parseHexKey(DECRYPT_KEY_HEX, 'GATEWAY_DECRYPT_KEY');
     } catch (err) {
       // Key misconfiguration is a server-side problem
-      console.error('[POST /report] Key configuration error:', err.message);
+      log.error({ err: err.message }, 'Key configuration error');
       return next(err);
     }
 
@@ -218,17 +231,20 @@ app.post('/report', async (req, res, next) => {
     try {
       decrypted = decryptPayload(payload, aesKey);
     } catch (err) {
+      log.warn({ eventId }, 'Decryption failed – invalid payload or key');
       return res.status(400).json({ error: 'Decryption failed – invalid payload or key' });
     }
 
     // ── 4. Verify Ed25519 signature over plaintext ───────────────────────────
     //    (sign-then-encrypt: signature was made before encryption on the edge)
     if (!verifySignature(decrypted, signature, publicKey)) {
+      log.warn({ eventId }, 'Signature verification failed');
       return res.status(401).json({ error: 'Signature verification failed' });
     }
 
     // ── 5. Cross-check envelope eventId with decrypted eventId ──────────────
     if (decrypted.eventId !== eventId) {
+      log.warn({ eventId }, 'eventId mismatch between envelope and payload');
       return res.status(400).json({ error: 'eventId mismatch between envelope and payload' });
     }
 
@@ -237,12 +253,14 @@ app.post('/report', async (req, res, next) => {
     try {
       normalised = normaliseReport(decrypted);
     } catch (err) {
+      log.warn({ eventId, err: err.message }, 'Report schema normalisation failed');
       return res.status(400).json({ error: err.message });
     }
 
     // ── 7. Publish to RabbitMQ ───────────────────────────────────────────────
     //    TODO: check Redis for duplicate eventId before publishing
     if (!mqChannel) {
+      log.warn({ eventId }, 'MQ unavailable – rejecting report');
       return res.status(503).json({ error: 'Message queue unavailable – try again shortly' });
     }
 
@@ -250,10 +268,16 @@ app.post('/report', async (req, res, next) => {
       EXCHANGE,
       ROUTING_KEY,
       Buffer.from(JSON.stringify(normalised)),
-      { persistent: true, contentType: 'application/json' },
+      {
+        persistent:    true,
+        contentType:   'application/json',
+        correlationId: req.correlationId,
+        messageId:     normalised.eventId,
+      },
     );
 
     // ── 8. 202 Accepted ──────────────────────────────────────────────────────
+    log.info({ eventId: normalised.eventId, syndromeCode: normalised.syndromeCode }, 'Report accepted and queued');
     return res.status(202).json({ accepted: true, eventId: normalised.eventId });
   } catch (err) {
     next(err);
@@ -263,8 +287,8 @@ app.post('/report', async (req, res, next) => {
 // ── Centralised error handler ─────────────────────────────────────────────────
 // Express 5 forwards async errors automatically; this handles remaining cases.
 // eslint-disable-next-line no-unused-vars
-app.use((err, _req, res, _next) => {
-  console.error('[api-gateway] Unhandled error:', err.message);
+app.use((err, req, res, _next) => {
+  child(req.correlationId).error({ err: err.message }, 'Unhandled error');
   res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -274,21 +298,24 @@ async function start() {
   if (!DECRYPT_KEY_HEX) {
     throw new Error('GATEWAY_DECRYPT_KEY environment variable is required');
   }
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET environment variable is required');
+  }
 
   // HTTP server starts immediately; RabbitMQ connection is established
   // asynchronously with automatic retries so the gateway can serve health
   // checks while the broker is still warming up (Docker compose scenario).
   app.listen(PORT, () => {
-    console.log(`[api-gateway] Listening on :${PORT}`);
+    logger.info({ correlation_id: 'none', port: PORT }, 'api-gateway listening');
   });
 
   connectRabbitMQ().catch((err) => {
-    console.error('[RabbitMQ] Initial connect attempt failed:', err.message);
+    logger.error({ correlation_id: 'none', err: err.message }, 'RabbitMQ initial connect failed');
   });
 }
 
 start().catch((err) => {
-  console.error('[api-gateway] Fatal startup error:', err.message);
+  logger.fatal({ correlation_id: 'none', err: err.message }, 'Fatal startup error');
   process.exit(1);
 });
 
