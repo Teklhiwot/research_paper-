@@ -1,32 +1,82 @@
-# React + TypeScript + Vite
+# FitnessPWA - Your Personal Fitness Coach
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A complete, production-quality Progressive Web Application (PWA) for fitness tracking, workout logging, weight monitoring, and body transformation tracking.
 
-Currently, two official plugins are available:
+## 🚀 Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+### Core Features Implemented
 
-## React Compiler
+- ✅ **Dashboard** - Overview of workouts, weight progress, BMI, and fasting status
+- ✅ **Workout Tracking** - Log exercises with sets, reps, and weights
+- ✅ **Rest Timers** - Automatic rest timer between sets
+- ✅ **Stopwatch** - Track workout duration
+- ✅ **Weight Tracker** - Daily weight logging with trend analysis
+- ✅ **Statistics** - Comprehensive workout and weight statistics
+- ✅ **Settings** - Dark mode, profile customization, import/export
+- ✅ **Offline Support** - Full offline functionality with IndexedDB
+- ✅ **Responsive Design** - Mobile, tablet, and desktop optimized
+- ✅ **Dark Mode** - Built-in dark mode toggle
+- ✅ **Data Export/Import** - Backup and restore all personal data
+- ✅ **PWA Manifest** - Installable on mobile and desktop
+- ✅ **Service Worker** - Full offline caching
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 🚀 Getting Started
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+cd fitness-pwa
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Build for production:
+```bash
+npm run build
+npm run preview
+```
+
+## 📋 Key Pages
+
+- **Dashboard** - Workout streak, weight progress, BMI, quick actions
+- **Workout** - Exercise logging with timers and set tracking
+- **Weight** - Daily weight tracking with trend analysis
+- **Statistics** - Workout frequency, completion rate, weight loss
+- **Settings** - Profile, dark mode, import/export, data reset
+
+## 💾 Data Storage
+
+All data stored locally with IndexedDB - **no cloud sync, complete privacy**
+
+## 🎨 UI/UX
+
+- Responsive design (mobile, tablet, desktop)
+- Dark mode support
+- Smooth animations with Framer Motion
+- Touch-friendly interface
+- Professional styling
+
+## 🚀 PWA Features
+
+- Installable on mobile and desktop
+- Full offline support
+- Service worker caching
+- App-like experience
+
+## 📊 Pre-configured Workouts
+
+- Monday: Chest + Triceps
+- Tuesday: Back + Biceps
+- Wednesday: Legs
+- Thursday: Shoulders
+- Friday: Full Body
+- Saturday: Weak Point Day
+- Sunday: Rest
+
+Plus daily abs routine and cardio program
+
+## 🛠️ Tech Stack
+
+React • TypeScript • Vite • Tailwind CSS • Dexie.js • React Router • IndexedDB • Workbox PWA
+
+---
+
+**Built with ❤️ for fitness enthusiasts who value privacy.**
